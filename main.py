@@ -23,12 +23,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 
 # ================= CONFIG =================
-try:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding='utf-8')
-except:
-    pass
-
 processed = 0
 total = 0
 lock = threading.Lock()
@@ -46,19 +40,22 @@ def create_driver(driver_path):
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--blink-settings=imagesEnabled=false")
 
     service = Service(driver_path)
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(30)
     return driver
 
-# ================= SCRAPE =================
+# ================= SCRAPE (RETRY 3 LẦN) =================
 def scrape(driver, ma_kh):
-    for _ in range(2):  # retry
+    url = "https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien"
+
+    for attempt in range(1, 4):  # retry 3 lần
         try:
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            driver.get("https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien")
+            driver.get(url)
 
             input_el = WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.ID, "idMaKhachHang"))
@@ -74,7 +71,7 @@ def scrape(driver, ma_kh):
                 )
             )
 
-            time.sleep(2)
+            time.sleep(1.5)
 
             content = driver.find_element(
                 By.ID, "idThongTinLichNgungGiamMaKhachHang"
@@ -82,26 +79,30 @@ def scrape(driver, ma_kh):
 
             return {
                 "Ma_KH": ma_kh,
-                "Thoi_gian": now,
+                "Thoi_gian_tra_cuu": now,
                 "Noi_dung": content
             }
 
-        except Exception:
-            time.sleep(2)
+        except Exception as e:
+            print(f"⚠️ Retry {attempt}/3 | {ma_kh} | {e}", flush=True)
+            time.sleep(2 * attempt)
 
     return {
         "Ma_KH": ma_kh,
-        "Thoi_gian": now,
-        "Noi_dung": "Lỗi"
+        "Thoi_gian_tra_cuu": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Noi_dung": "Lỗi sau 3 lần retry"
     }
 
 # ================= WORKER =================
 def worker(data, driver_path, output):
     global processed
+
     driver = create_driver(driver_path)
     buffer = []
 
     try:
+        driver.get("https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien")
+
         for ma_kh in data:
             res = scrape(driver, ma_kh)
             buffer.append(res)
@@ -114,7 +115,7 @@ def worker(data, driver_path, output):
                 write_csv(output, buffer)
                 buffer = []
 
-            time.sleep(random.uniform(1.5, 3))
+            time.sleep(random.uniform(1, 2))
 
         if buffer:
             write_csv(output, buffer)
@@ -123,15 +124,13 @@ def worker(data, driver_path, output):
         driver.quit()
 
 # ================= CSV =================
-def write_csv(file, rows, mode='a', header=False):
+def write_csv(file, rows):
     with csv_lock:
-        with open(file, mode, newline='', encoding='utf-8-sig') as f:
+        with open(file, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=["Ma_KH", "Thoi_gian", "Noi_dung"]
+                fieldnames=["Ma_KH", "Thoi_gian_tra_cuu", "Noi_dung"]
             )
-            if header:
-                writer.writeheader()
             writer.writerows(rows)
 
 # ================= PROCESS =================
@@ -140,6 +139,9 @@ def process(input_csv):
     rows = []
 
     for _, row in df.iterrows():
+
+        ma_kh = row["Ma_KH"]
+        time_query = row["Thoi_gian_tra_cuu"]
         text = str(row["Noi_dung"])
 
         kh = re.search(r"KHÁCH HÀNG:\s*(.+)", text)
@@ -157,17 +159,29 @@ def process(input_csv):
 
             if ma and tg:
                 rows.append([
-                    row["Ma_KH"], kh, dc,
+                    ma_kh,
+                    time_query,
+                    kh,
+                    dc,
                     ma.group(1),
-                    tg.group(2), tg.group(1),
-                    tg.group(4), tg.group(3),
+                    tg.group(2),
+                    tg.group(1),
+                    tg.group(4),
+                    tg.group(3),
                     lydo.group(1) if lydo else ""
                 ])
 
     df2 = pd.DataFrame(rows, columns=[
-        "Ma_KH", "Khach_hang", "Dia_chi",
-        "Ma_lich", "Ngay_BD", "Gio_BD",
-        "Ngay_KT", "Gio_KT", "Ly_do"
+        "Ma_KH",
+        "Thoi_gian_tra_cuu",
+        "Khach_hang",
+        "Dia_chi",
+        "Ma_lich",
+        "Ngay_BD",
+        "Gio_BD",
+        "Ngay_KT",
+        "Gio_KT",
+        "Ly_do"
     ])
 
     df2.to_excel("output.xlsx", index=False)
@@ -208,27 +222,32 @@ def upload_sheet(df):
 
 # ================= MAIN =================
 if __name__ == "__main__":
+
     file_input = "makh_list.csv"
     file_raw = "raw.csv"
 
     if not os.path.exists(file_input):
-        print("❌ Thiếu file makh_list.csv")
+        print("❌ Thiếu makh_list.csv")
         exit()
 
     with open(file_input, encoding="utf-8") as f:
         data = [r[0] for r in csv.reader(f) if r]
 
-    total = len(data)   # ✅ KHÔNG cần global
+    total = len(data)
 
     driver_path = ChromeDriverManager().install()
 
-    write_csv(file_raw, [], mode="w", header=True)
+    write_csv(file_raw, [])
 
     threads = 4
     chunks = [data[i::threads] for i in range(threads)]
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        futures = [ex.submit(worker, c, driver_path, file_raw) for c in chunks]
+        futures = [
+            ex.submit(worker, c, driver_path, file_raw)
+            for c in chunks
+        ]
+
         for f in as_completed(futures):
             f.result()
 
