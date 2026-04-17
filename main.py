@@ -95,6 +95,7 @@ def scrape(driver, ma_kh):
 # ================= WORKER =================
 def worker(data, driver_path, output):
     global processed
+
     driver = create_driver(driver_path)
     buffer = []
 
@@ -119,7 +120,7 @@ def worker(data, driver_path, output):
     finally:
         driver.quit()
 
-# ================= CSV =================
+# ================= CSV (FIX QUAN TRỌNG) =================
 def write_csv(file, rows):
     with csv_lock:
         file_exists = os.path.exists(file)
@@ -193,6 +194,7 @@ def upload_sheet(df):
     try:
         raw = os.getenv("GCP_JSON")
         raw = raw.replace("\\n", "\n")
+
         info = json.loads(raw)
         info["private_key"] = info["private_key"].replace("\\n", "\n")
 
@@ -232,7 +234,8 @@ if __name__ == "__main__":
 
     driver_path = ChromeDriverManager().install()
 
-    write_csv(file_raw, [], mode="w", header=True)
+    # FIX lỗi bạn gặp trước đó
+    write_csv(file_raw, [])
 
     threads = 4
     chunks = [data[i::threads] for i in range(threads)]
