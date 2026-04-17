@@ -2,10 +2,9 @@
 
 ## 🚀 Chức năng
 - Đọc mã KH từ Google Sheets
-- Tự động tra cứu lịch cắt điện EVN
-- Ghi kết quả ra:
+- Tra cứu lịch cắt điện EVN
+- Xuất kết quả ra:
   - Google Sheets
-  - CSV
   - Excel
 
 ## ⚙️ Cài đặt
