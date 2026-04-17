@@ -23,12 +23,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 
 # ================= CONFIG =================
-try:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding='utf-8')
-except:
-    pass
-
 processed = 0
 total = 0
 lock = threading.Lock()
@@ -49,11 +43,11 @@ def create_driver(driver_path):
     service = Service(driver_path)
     return webdriver.Chrome(service=service, options=options)
 
-# ================= SCRAPE =================
+# ================= SCRAPE (RETRY 3 LẦN) =================
 def scrape(driver, ma_kh):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for i in range(3):  # retry 3 lần
+    for i in range(3):
         try:
             driver.get("https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien")
 
@@ -75,7 +69,7 @@ def scrape(driver, ma_kh):
 
             content = driver.find_element(
                 By.ID, "idThongTinLichNgungGiamMaKhachHang"
-            ).text.strip()
+            ).get_attribute("innerText")
 
             return {
                 "Ma_KH": ma_kh,
@@ -112,7 +106,7 @@ def worker(data, driver_path, output):
                 write_csv(output, buffer)
                 buffer = []
 
-            time.sleep(random.uniform(1.2, 2.5))
+            time.sleep(random.uniform(1.5, 2.5))
 
         if buffer:
             write_csv(output, buffer)
@@ -130,16 +124,14 @@ def write_csv(file, rows):
                 f,
                 fieldnames=["Ma_KH", "Thoi_gian_tra_cuu", "Noi_dung"]
             )
-
             if not file_exists:
                 writer.writeheader()
-
             writer.writerows(rows)
 
-# ================= CLEAN TEXT (FIX GOOGLE SHEETS ERROR) =================
-def clean_text(value):
+# ================= CLEAN DATA (FIX GOOGLE SHEETS ERROR) =================
+def clean(value):
     if isinstance(value, str):
-        return re.sub(r"[\x00-\x1F\x7F]", "", value)
+        return re.sub(r"[\x00-\x1F\x7F-\x9F]", "", value)
     return value
 
 # ================= PROCESS =================
@@ -148,9 +140,9 @@ def process(input_csv):
     rows = []
 
     for _, row in df.iterrows():
-        text = str(row.get("Noi_dung", ""))
-        ma_kh = row.get("Ma_KH", "")
-        time_query = row.get("Thoi_gian_tra_cuu", "")
+        text = str(row["Noi_dung"])
+        ma_kh = row["Ma_KH"]
+        time_query = row["Thoi_gian_tra_cuu"]
 
         kh = re.search(r"KHÁCH HÀNG:\s*(.+)", text)
         dc = re.search(r"ĐỊA CHỈ:\s*(.+)", text)
@@ -217,11 +209,11 @@ def upload_sheet(df):
         try:
             ws = sheet.worksheet(TARGET_SHEET)
         except WorksheetNotFound:
-            ws = sheet.add_worksheet(title=TARGET_SHEET, rows="1000", cols="20")
+            ws = sheet.add_worksheet(title=TARGET_SHEET, rows="2000", cols="20")
 
         ws.clear()
 
-        df = df.applymap(clean_text)
+        df = df.applymap(clean)
 
         data = [df.columns.tolist()] + df.astype(str).values.tolist()
 
@@ -249,7 +241,10 @@ if __name__ == "__main__":
 
     # reset file
     with open(file_raw, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["Ma_KH", "Thoi_gian_tra_cuu", "Noi_dung"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["Ma_KH", "Thoi_gian_tra_cuu", "Noi_dung"]
+        )
         writer.writeheader()
 
     threads = 4
