@@ -5,9 +5,14 @@ import os
 import time
 import threading
 import random
+import re
+import json
+import sys
+import gspread
+from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -17,197 +22,216 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-
 # ================= CONFIG =================
-THREADS = 4
-RETRIES = 3
-SHEET_NAME = "auto-evn"
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding='utf-8')
+except:
+    pass
 
-OUTPUT_CSV = "data.csv"
-OUTPUT_XLSX = "data.xlsx"
-
-
-# ================= GLOBAL =================
 processed = 0
 total = 0
 lock = threading.Lock()
+csv_lock = threading.Lock()
 
-
-# ================= GOOGLE SHEET =================
-def connect_gsheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
-    return gspread.authorize(creds)
-
-
-def read_makh():
-    client = connect_gsheet()
-    sheet = client.open(SHEET_NAME).sheet1
-    data = sheet.col_values(1)
-    return [x.strip() for x in data if x.strip() and x != "Ma_KH"]
-
-
-def write_gsheet(rows):
-    client = connect_gsheet()
-
-    try:
-        ws = client.open(SHEET_NAME).worksheet("output")
-    except:
-        ws = client.open(SHEET_NAME).add_worksheet(title="output", rows="1000", cols="10")
-
-    data = [[r['Ma_KH'], r['Thoi_gian'], r['Ket_qua']] for r in rows]
-    ws.append_rows(data)
-
+SPREADSHEET_ID = "1FVu_-BWCk_c7rjtC5ovq4wSish8U7bx3ay-KhNiYqXY"
+TARGET_SHEET = "upload"
 
 # ================= DRIVER =================
-def create_driver():
+def create_driver(driver_path):
     options = Options()
     options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    try:
-        if os.path.exists(r"D:\chromedriver\chromedriver.exe"):
-            service = Service(r"D:\chromedriver\chromedriver.exe")
-        else:
-            service = Service(ChromeDriverManager().install())
+    service = Service(driver_path)
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(30)
+    return driver
 
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(40)
-        return driver
-
-    except Exception as e:
-        print("❌ Driver error:", e)
-        raise
-
-
-# ================= CSV =================
-file_lock = threading.Lock()
-
-def write_csv(data, mode='a', header=False):
-    with file_lock:
-        with open(OUTPUT_CSV, mode, newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=['Ma_KH','Thoi_gian','Ket_qua'])
-            if header:
-                writer.writeheader()
-            writer.writerows(data)
-
-
-def export_excel():
-    df = pd.read_csv(OUTPUT_CSV)
-    df.to_excel(OUTPUT_XLSX, index=False)
-
-
-# ================= LOGIC =================
-def is_valid(text):
-    t = text.lower()
-    return not ("lỗi" in t or "không tìm thấy" in t or t.strip() == "")
-
-
+# ================= SCRAPE =================
 def scrape(driver, ma_kh):
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for _ in range(2):  # retry
+        try:
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    try:
-        driver.get('https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien')
+            driver.get("https://cskh.evnspc.vn/TraCuu/LichNgungGiamCungCapDien")
 
-        ip = WebDriverWait(driver, 30).until(
-            EC.visibility_of_element_located((By.ID, 'idMaKhachHang'))
-        )
+            input_el = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.ID, "idMaKhachHang"))
+            )
 
-        ip.clear()
-        ip.send_keys(ma_kh)
-        ip.send_keys(Keys.RETURN)
+            input_el.clear()
+            input_el.send_keys(ma_kh)
+            input_el.send_keys(Keys.RETURN)
 
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.ID, 'idThongTinLichNgungGiamMaKhachHang'))
-        )
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located(
+                    (By.ID, "idThongTinLichNgungGiamMaKhachHang")
+                )
+            )
 
-        div = driver.find_element(By.ID, 'idThongTinLichNgungGiamMaKhachHang')
-        text = div.text.strip()
+            time.sleep(2)
 
-        tables = div.find_elements(By.TAG_NAME, 'table')
+            content = driver.find_element(
+                By.ID, "idThongTinLichNgungGiamMaKhachHang"
+            ).text.strip()
 
-        if tables:
-            rows = tables[0].find_elements(By.TAG_NAME, 'tr')
-            data = []
+            return {
+                "Ma_KH": ma_kh,
+                "Thoi_gian": now,
+                "Noi_dung": content
+            }
 
-            for r in rows[1:]:
-                cols = [c.text.strip() for c in r.find_elements(By.TAG_NAME, 'td') if c.text.strip()]
-                if cols:
-                    data.append(", ".join(cols))
+        except Exception:
+            time.sleep(2)
 
-            result = "; ".join(data) if data else "Không có lịch"
+    return {
+        "Ma_KH": ma_kh,
+        "Thoi_gian": now,
+        "Noi_dung": "Lỗi"
+    }
 
-        else:
-            result = text or "Không có dữ liệu"
-
-        return {'Ma_KH': ma_kh, 'Thoi_gian': now, 'Ket_qua': result}
-
-    except Exception as e:
-        return {'Ma_KH': ma_kh, 'Thoi_gian': now, 'Ket_qua': f"Lỗi: {e}"}
-
-
-def scrape_retry(driver, ma_kh):
-    for i in range(RETRIES):
-        r = scrape(driver, ma_kh)
-        if is_valid(r['Ket_qua']):
-            return r
-
-        time.sleep(2 + i)
-
-    return r
-
-
-def worker(data):
+# ================= WORKER =================
+def worker(data, driver_path, output):
     global processed
-
-    driver = create_driver()
+    driver = create_driver(driver_path)
+    buffer = []
 
     try:
         for ma_kh in data:
-            r = scrape_retry(driver, ma_kh)
+            res = scrape(driver, ma_kh)
+            buffer.append(res)
 
             with lock:
                 processed += 1
-                print(f"[{processed}/{total}] {ma_kh}")
+                print(f"📊 {processed}/{total} | {ma_kh}", flush=True)
 
-            write_csv([r])
-            write_gsheet([r])
+            if len(buffer) >= 5:
+                write_csv(output, buffer)
+                buffer = []
 
             time.sleep(random.uniform(1.5, 3))
+
+        if buffer:
+            write_csv(output, buffer)
 
     finally:
         driver.quit()
 
+# ================= CSV =================
+def write_csv(file, rows, mode='a', header=False):
+    with csv_lock:
+        with open(file, mode, newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["Ma_KH", "Thoi_gian", "Noi_dung"]
+            )
+            if header:
+                writer.writeheader()
+            writer.writerows(rows)
+
+# ================= PROCESS =================
+def process(input_csv):
+    df = pd.read_csv(input_csv)
+    rows = []
+
+    for _, row in df.iterrows():
+        text = str(row["Noi_dung"])
+
+        kh = re.search(r"KHÁCH HÀNG:\s*(.+)", text)
+        dc = re.search(r"ĐỊA CHỈ:\s*(.+)", text)
+
+        kh = kh.group(1).strip() if kh else ""
+        dc = dc.group(1).strip() if dc else ""
+
+        blocks = re.split(r"(?=MÃ.*?LỊCH)", text, flags=re.IGNORECASE)
+
+        for b in blocks:
+            ma = re.search(r"MÃ.*LỊCH:\s*(\d+)", b)
+            tg = re.search(r"từ (.+?) ngày (.+?) đến (.+?) ngày (.+)", b)
+            lydo = re.search(r"LÝ DO.*:\s*(.+)", b)
+
+            if ma and tg:
+                rows.append([
+                    row["Ma_KH"], kh, dc,
+                    ma.group(1),
+                    tg.group(2), tg.group(1),
+                    tg.group(4), tg.group(3),
+                    lydo.group(1) if lydo else ""
+                ])
+
+    df2 = pd.DataFrame(rows, columns=[
+        "Ma_KH", "Khach_hang", "Dia_chi",
+        "Ma_lich", "Ngay_BD", "Gio_BD",
+        "Ngay_KT", "Gio_KT", "Ly_do"
+    ])
+
+    df2.to_excel("output.xlsx", index=False)
+    upload_sheet(df2)
+
+# ================= GOOGLE SHEETS =================
+def upload_sheet(df):
+    try:
+        raw = os.getenv("GCP_JSON")
+        raw = raw.replace("\\\\n", "\\n")
+
+        info = json.loads(raw)
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+
+        creds = Credentials.from_service_account_info(info, scopes=scope)
+        client = gspread.authorize(creds)
+
+        sheet = client.open_by_key(SPREADSHEET_ID)
+
+        try:
+            ws = sheet.worksheet(TARGET_SHEET)
+        except WorksheetNotFound:
+            ws = sheet.add_worksheet(title=TARGET_SHEET, rows="1000", cols="20")
+
+        ws.clear()
+        data = [df.columns.tolist()] + df.astype(str).values.tolist()
+        ws.update(range_name="A1", values=data)
+
+        print("✅ Upload Google Sheets OK")
+
+    except Exception as e:
+        print("❌ Sheet lỗi:", e)
 
 # ================= MAIN =================
 if __name__ == "__main__":
+    file_input = "makh_list.csv"
+    file_raw = "raw.csv"
 
-    data = read_makh()
-
-    if not data:
-        print("❌ Không có dữ liệu")
+    if not os.path.exists(file_input):
+        print("❌ Thiếu file makh_list.csv")
         exit()
 
-    total = len(data)
-    print(f"🚀 Tổng: {total}")
+    with open(file_input, encoding="utf-8") as f:
+        data = [r[0] for r in csv.reader(f) if r]
 
-    write_csv([], mode='w', header=True)
+    total = len(data)   # ✅ KHÔNG cần global
 
-    chunks = [data[i::THREADS] for i in range(THREADS)]
+    driver_path = ChromeDriverManager().install()
 
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-        futures = [ex.submit(worker, chunk) for chunk in chunks]
+    write_csv(file_raw, [], mode="w", header=True)
 
+    threads = 4
+    chunks = [data[i::threads] for i in range(threads)]
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futures = [ex.submit(worker, c, driver_path, file_raw) for c in chunks]
         for f in as_completed(futures):
             f.result()
 
-    export_excel()
+    process(file_raw)
 
-    print("✅ DONE")
+    print("🏁 DONE")
